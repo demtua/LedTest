@@ -3,7 +3,7 @@
 // immediate STOP, and an automatic safety cutoff.
 //
 // PROTOCOL (plain text, one command per line, case-insensitive, 115200 baud)
-//   START   start (or restart) the hot-flash sequence; turns the channel on
+//   START   start (or restart) the hot-flash sequence; opens the channel
 //   STOP    stop immediately; everything off
 //   STATUS  report current state
 //   HELP    list commands
@@ -11,15 +11,16 @@
 // Messages sent by the ESP32:
 //   READY ...           after boot
 //   OK START / OK STOP  command accepted
-//   DONE                sequence finished (the channel stays on)
-//   CUTOFF ...          safety cutoff: no command for CUTOFF_MS while the channel was on
+//   DONE                sequence finished (the channel stays open)
+//   CUTOFF ...          safety cutoff: no command for CUTOFF_MS while the channel was open
 //   ERR ...             unknown or malformed command
 //
 // SAFETY CUTOFF
-//   START switches the "channel" LED on (think: heating element). It stays on after
-//   the sequence has finished, until STOP or until no command has arrived for
-//   CUTOFF_MS (10 s). Then the ESP32 switches the channel and the sequence off by
-//   itself. Every valid command resets that timer.
+//   START opens the "channel" (think: a heating element being powered). It stays
+//   open after the sequence has finished, until STOP or until no command has
+//   arrived for CUTOFF_MS (10 s). Then the ESP32 closes the channel and switches
+//   the LEDs off by itself. Every valid command resets that timer.
+//   The channel has no pin of its own; STATUS reports it as channel=1/0.
 //
 // WIRING: each LED pin -> 220 ohm resistor -> LED anode, LED cathode -> GND.
 // Pins below suit a classic ESP32 DevKit. For ESP32-S3/C3 boards pick free
@@ -27,7 +28,6 @@
 
 const uint8_t SEQ_PINS[]  = {4, 16, 17, 5, 18};  // LED 0..4 = rising intensity
 const uint8_t NUM_SEQ     = sizeof(SEQ_PINS);
-const uint8_t CHANNEL_PIN = 23;                    // the safety-controlled channel
 const unsigned long CUTOFF_MS = 10000;
 
 // ---- The hot-flash sequence -------------------------------------------------
@@ -49,7 +49,7 @@ const uint16_t SEQ_END_MS = 6700;
 
 // ---- State --------------------------------------------------------------------
 bool running = false;
-bool channelOn = false;
+bool channelOn = false;               // open from START until STOP or the cutoff
 uint8_t stepIdx = 0;
 unsigned long seqStart = 0;
 unsigned long lastCmd = 0;
@@ -59,14 +59,9 @@ uint8_t rxLen = 0;
 bool rxOverflow = false;
 
 // ---- Outputs ------------------------------------------------------------------
-void setChannel(bool on) {
-  channelOn = on;
-  digitalWrite(CHANNEL_PIN, on ? HIGH : LOW);
-}
-
 void allOff() {
   for (uint8_t i = 0; i < NUM_SEQ; i++) digitalWrite(SEQ_PINS[i], LOW);
-  setChannel(false);
+  channelOn = false;
 }
 
 void startSequence() {
@@ -74,7 +69,7 @@ void startSequence() {
   stepIdx = 0;
   seqStart = millis();
   running = true;
-  setChannel(true);
+  channelOn = true;
 }
 
 void stopSequence() {
@@ -138,7 +133,6 @@ void readSerial() {
 void setup() {
   Serial.begin(115200);
   for (uint8_t i = 0; i < NUM_SEQ; i++) pinMode(SEQ_PINS[i], OUTPUT);
-  pinMode(CHANNEL_PIN, OUTPUT);
   allOff();                         // safe state at power-up
   Serial.println("READY hot-flash test. Commands: START STOP STATUS HELP");
 }
