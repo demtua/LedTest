@@ -3,24 +3,22 @@
 // immediate STOP, and an automatic safety cutoff.
 //
 // PROTOCOL (plain text, one command per line, case-insensitive, 115200 baud)
-//   START   start (or restart) the hot-flash sequence; opens the channel
-//   STOP    stop immediately; everything off
-//   STATUS  report current state
+//   START   start (or restart) the hot-flash sequence
+//   STOP    stop the sequence immediately; LEDs off
 //   HELP    list commands
 //
 // Messages sent by the ESP32:
 //   READY ...           after boot
 //   OK START / OK STOP  command accepted
-//   DONE                sequence finished (the channel stays open)
-//   CUTOFF ...          safety cutoff: no command for CUTOFF_MS while the channel was open
+//   DONE                sequence finished
+//   CUTOFF ...          safety cutoff: no command for CUTOFF_MS, the channel is closed
 //   ERR ...             unknown or malformed command
 //
 // SAFETY CUTOFF
-//   START opens the "channel" (think: a heating element being powered). It stays
-//   open after the sequence has finished, until STOP or until no command has
-//   arrived for CUTOFF_MS (10 s). Then the ESP32 closes the channel and switches
-//   the LEDs off by itself. Every valid command resets that timer.
-//   The channel has no pin of its own; STATUS reports it as channel=1/0.
+//   The "channel" is the link to the PC. Every valid command keeps it open. If no
+//   command arrives for CUTOFF_MS (10 s), the ESP32 closes the channel by itself:
+//   it stops the sequence, switches all LEDs off and sends CUTOFF. This needs no
+//   PC, so it also covers a closed client or a broken connection.
 //
 // WIRING: each LED pin -> 220 ohm resistor -> LED anode, LED cathode -> GND.
 // Pins below suit a classic ESP32 DevKit. For ESP32-S3/C3 boards pick free
@@ -49,7 +47,7 @@ const uint16_t SEQ_END_MS = 6700;
 
 // ---- State --------------------------------------------------------------------
 bool running = false;
-bool channelOn = false;               // open from START until STOP or the cutoff
+bool channelOn = false;               // the link to the PC: open while commands keep arriving
 uint8_t stepIdx = 0;
 unsigned long seqStart = 0;
 unsigned long lastCmd = 0;
@@ -61,7 +59,6 @@ bool rxOverflow = false;
 // ---- Outputs ------------------------------------------------------------------
 void allOff() {
   for (uint8_t i = 0; i < NUM_SEQ; i++) digitalWrite(SEQ_PINS[i], LOW);
-  channelOn = false;
 }
 
 void startSequence() {
@@ -69,7 +66,6 @@ void startSequence() {
   stepIdx = 0;
   seqStart = millis();
   running = true;
-  channelOn = true;
 }
 
 void stopSequence() {
@@ -89,18 +85,17 @@ void handleCommand(char *cmd) {
   } else if (strcmp(cmd, "STOP") == 0) {
     stopSequence();
     Serial.println("OK STOP");
-  } else if (strcmp(cmd, "STATUS") == 0) {
-    Serial.printf("STATUS running=%d channel=%d step=%u/%u elapsed=%lu ms\n",
-                  running, channelOn, stepIdx, NUM_STEPS,
-                  running ? millis() - seqStart : 0UL);
   } else if (strcmp(cmd, "HELP") == 0) {
-    Serial.println("COMMANDS: START STOP STATUS HELP");
+    Serial.println("COMMANDS: START STOP HELP");
   } else {
     valid = false;
     Serial.printf("ERR unknown command: %s\n", cmd);
   }
 
-  if (valid) lastCmd = millis();   // only real commands keep the channel alive
+  if (valid) {                     // only real commands keep the channel open
+    lastCmd = millis();
+    channelOn = true;
+  }
 }
 
 // Collects characters into a line without blocking.
@@ -134,7 +129,7 @@ void setup() {
   Serial.begin(115200);
   for (uint8_t i = 0; i < NUM_SEQ; i++) pinMode(SEQ_PINS[i], OUTPUT);
   allOff();                         // safe state at power-up
-  Serial.println("READY hot-flash test. Commands: START STOP STATUS HELP");
+  Serial.println("READY hot-flash test. Commands: START STOP HELP");
 }
 
 void loop() {
@@ -152,12 +147,13 @@ void loop() {
     }
 
     if (stepIdx >= NUM_STEPS && elapsed >= SEQ_END_MS) {
-      running = false;              // the channel stays on until STOP or the cutoff
+      running = false;
       Serial.println("DONE");
     }
   }
 
   if (channelOn && now - lastCmd > CUTOFF_MS) {
+    channelOn = false;
     stopSequence();
     Serial.printf("CUTOFF no command for %lu ms\n", CUTOFF_MS);
   }

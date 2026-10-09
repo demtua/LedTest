@@ -9,14 +9,15 @@ Usage:
     python hotflash_client.py                 (lists available ports)
 
 Commands at the prompt:
-    start     play the hot-flash sequence (turns the channel on)
+    start     play the hot-flash sequence
     stop      stop immediately
-    status    ask the ESP32 for its state
     help      list these commands
     quit      exit (Ctrl+C does the same); does not send STOP
 
-After 10 s without a command, the ESP32 switches the channel off by itself
-(CUTOFF) and this client closes the connection and exits.
+After 10 s without a command, the ESP32 closes the channel by itself (CUTOFF):
+it stops the sequence and switches the LEDs off. When this client receives the
+CUTOFF message, it closes the connection and exits. The timeout lives only on
+the ESP32 (CUTOFF_MS in hotflash.ino).
 """
 
 
@@ -28,10 +29,8 @@ import time
 import serial
 from serial.tools import list_ports
 
-CUTOFF_S = 10                    # must match CUTOFF_MS in hotflash.ino
-IDLE_TIMEOUT = CUTOFF_S + 0.5    # close a little after the ESP32's cutoff, so its CUTOFF message shows
-ESP32_COMMANDS = ("start", "stop", "status")
-COMMANDS = "start, stop, status, help, quit"
+ESP32_COMMANDS = ("start", "stop")
+COMMANDS = "start, stop, help, quit"
 
 
 class Client:
@@ -40,7 +39,7 @@ class Client:
         self.ser.port, self.ser.baudrate, self.ser.timeout = port, baud, 0.1
         # ESP32 boards wire DTR/RTS to their reset pin. Keeping both off means closing
         # the port (quit, Ctrl+C, closing the terminal) doesn't restart the ESP32,
-        # so a running channel is ended by the safety cutoff instead.
+        # so a running sequence is ended by the safety cutoff instead.
         self.ser.dtr = False
         self.ser.rts = False
         self.ser.open()
@@ -49,15 +48,12 @@ class Client:
 
         self.lock = threading.Lock()
         self.alive = True
-        self.last_cmd = time.monotonic()
 
         threading.Thread(target=self._reader, daemon=True).start()
-        threading.Thread(target=self._idle_watch, daemon=True).start()
 
     def send(self, line):
         with self.lock:
             self.ser.write((line + "\n").encode())
-        self.last_cmd = time.monotonic()
 
     def _print(self, text):
         print(f"\n{text}\n> ", end="", flush=True)
@@ -75,16 +71,12 @@ class Client:
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 text = line.decode(errors="replace").strip()
+                if text.startswith("CUTOFF"):    # the ESP32 closed the channel: close the connection too
+                    print(f"\n<< {text}\nConnection closed.", flush=True)
+                    self.close()
+                    os._exit(0)                  # the main thread is stuck waiting in input()
                 if text:
                     self._print(f"<< {text}")
-
-    def _idle_watch(self):
-        while self.alive:
-            if time.monotonic() - self.last_cmd > IDLE_TIMEOUT:
-                print(f"\nNo command for {CUTOFF_S} s - connection closed.", flush=True)
-                self.close()
-                os._exit(0)              # the main thread is stuck waiting in input()
-            time.sleep(0.1)
 
     def close(self):
         self.alive = False
